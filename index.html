@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gaze Text-Entry Experiment</title>
+
+    <!-- EyeGesturesLite peer dependencies + library, served locally from
+         public/vendor/. Avoids CDN reachability issues (ad-blockers, corporate
+         firewalls, privacy extensions blocking eyegestures.com / lactame.com).
+         Loaded eagerly so window.EyeGestures is defined before React mounts. -->
+    <link rel="stylesheet" href="/vendor/eyegestures.css" />
+    <!-- eyegestures.js calls a global `showError(msg)` helper but never
+         defines it (the upstream example expects the host page to provide it).
+         Define it BEFORE loading eyegestures.js so it is in scope. -->
+    <script>
+      function showError(msg) {
+        var el = document.getElementById("error");
+        if (el) el.textContent = String(msg);
+        console.error("[EyeGesturesLite]", msg);
+      }
+    </script>
+    <script src="/vendor/ml.min.js"></script>
+    <script src="/vendor/math.min.js"></script>
+    <script src="/vendor/eyegestures.js"></script>
+    <!-- eyegestures.js declares `class EyeGestures` at top level. Classic-script
+         class declarations create a lexical binding but do NOT attach to
+         window, so ES modules (React) cannot see it. Bridge it explicitly. -->
+    <script>
+      if (typeof EyeGestures !== "undefined") {
+        window.EyeGestures = EyeGestures;
+      }
+    </script>
+  </head>
+  <body>
+    <!-- EyeGesturesLite needs a <video> element it can attach the camera to.
+         Hidden by default; the library writes its calibration UI to body.
+         The ID MUST be "video": the library's processing tick uses
+         document.getElementById("video") (hardcoded, despite the constructor
+         taking a video id as a parameter — only setupMediaPipe honors it). -->
+    <video
+      id="video"
+      width="640"
+      height="480"
+      autoplay
+      playsinline
+      muted
+      style="display: none;"
+    ></video>
+    <!-- EyeGesturesLite writes load/init progress to #status and any failure
+         (incl. denied webcam permission, MediaPipe load failure) to #error.
+         Kept hidden visually; surfaced in the calibration UI in React. -->
+    <div id="status" style="display: none;"></div>
+    <div id="error" style="display: none;"></div>
+
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

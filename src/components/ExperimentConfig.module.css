@@ -1,0 +1,105 @@
+.form {
+  max-width: 820px;
+  margin: 2rem auto;
+  padding: 2rem;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem 1.5rem;
+}
+
+.form h2 {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.form label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.85rem;
+  color: #333;
+  gap: 0.3rem;
+}
+
+.form input,
+.form select {
+  font-size: 1rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.fullWidth {
+  grid-column: 1 / -1;
+}
+
+.datasetRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.datasetRow input[type="text"],
+.datasetRow input:not([type]) {
+  flex: 1;
+  min-width: 220px;
+}
+
+.datasetRow button {
+  padding: 0.45rem 0.8rem;
+  background: #444;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.upload {
+  background: #eee;
+  padding: 0.4rem 0.7rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.upload input[type="file"] {
+  display: none;
+}
+
+.preview {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  background: #f6f8fa;
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+}
+
+.error {
+  margin-top: 0.5rem;
+  color: #c0392b;
+  font-size: 0.85rem;
+}
+
+.keyPicker input {
+  cursor: pointer;
+  background: #f4f7ff;
+}
+
+.primary {
+  grid-column: 1 / -1;
+  padding: 0.8rem 1.2rem;
+  background: #2c6df0;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.primary:hover {
+  background: #1f5acb;
+}
