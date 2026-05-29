@@ -1,6 +1,6 @@
 // Shared types for the gaze text-entry experiment.
 
-export type GazeSource = "EyeGesturesLite" | "MouseDebug";
+export type GazeSource = "WebGazer" | "MouseDebug";
 
 export interface Demographics {
   participant_id: string;

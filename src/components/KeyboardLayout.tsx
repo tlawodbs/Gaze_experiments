@@ -44,14 +44,41 @@ export const KeyboardLayout = forwardRef<HTMLDivElement, Props>(function Keyboar
   { radius, spacing, scale, hoveredKey, onLayout },
   ref,
 ) {
-  const r = radius * scale;
-  const diameter = r * 2;
-  const slot = diameter + spacing; // horizontal slot center-to-center for letters
-  const dy = diameter + spacing; // vertical center-to-center between rows
-
   // Compute key centers in a local coordinate system anchored at the keyboard's
   // top-left corner. We add a half-key margin so circles never bleed out.
+  //
+  // The requested size (radius * scale) is treated as a *desired* size. Because
+  // the top row has 10 keys, a large desired size easily exceeds the viewport
+  // width; we therefore shrink uniformly so the widest row always fits the
+  // available width. On wide screens the keyboard grows to fill the width
+  // (= as big as possible); on narrow ones it scales down instead of clipping.
   const layout = useMemo(() => {
+    const avail = (typeof window !== "undefined" ? window.innerWidth : 1280) - 32;
+
+    // Width of the widest row (+ side margins) for a given radius/spacing.
+    const containerWidthFor = (rr: number, sp: number) => {
+      const dia = rr * 2;
+      const margin = rr + 4;
+      const rowWidths = ROWS.map((row) => {
+        const totalSlots = row.reduce((acc, k) => acc + k.widthFactor, 0);
+        return totalSlots * dia + (row.length - 1) * sp;
+      });
+      return Math.max(...rowWidths) + margin * 2;
+    };
+
+    let r = radius * scale;
+    let sp = spacing;
+    const desiredW = containerWidthFor(r, sp);
+    if (desiredW > avail) {
+      const f = avail / desiredW;
+      r *= f;
+      sp *= f;
+    }
+
+    const diameter = r * 2;
+    const dy = diameter + sp; // vertical center-to-center between rows
+    const margin = r + 4;
+
     type PlacedKey = {
       char: string;
       label: string;
@@ -61,14 +88,13 @@ export const KeyboardLayout = forwardRef<HTMLDivElement, Props>(function Keyboar
       h: number;
     };
     const keys: PlacedKey[] = [];
-    const margin = r + 4;
     // Container width is driven by the widest row, including space-key factor.
     const rowWidths = ROWS.map((row) => {
       const totalSlots = row.reduce((acc, k) => acc + k.widthFactor, 0);
-      return totalSlots * diameter + (row.length - 1) * spacing;
+      return totalSlots * diameter + (row.length - 1) * sp;
     });
     const containerW = Math.max(...rowWidths) + margin * 2;
-    const containerH = ROWS.length * diameter + (ROWS.length - 1) * spacing + margin * 2;
+    const containerH = ROWS.length * diameter + (ROWS.length - 1) * sp + margin * 2;
 
     ROWS.forEach((row, rowIdx) => {
       const rowW = rowWidths[rowIdx];
@@ -87,11 +113,14 @@ export const KeyboardLayout = forwardRef<HTMLDivElement, Props>(function Keyboar
           w: keyW,
           h: diameter,
         });
-        cursorX += keyW + spacing;
+        cursorX += keyW + sp;
       }
     });
-    return { keys, containerW, containerH };
-  }, [r, dy, diameter, spacing]);
+    return { keys, containerW, containerH, r };
+  }, [radius, scale, spacing]);
+
+  // Effective radius after fit-scaling — drives font size / shape decisions.
+  const r = layout.r;
 
   // Keep a local ref so we can read the DOM rect from a layout effect (below)
   // and forward the same node to the parent's ref. Inlining layout computation

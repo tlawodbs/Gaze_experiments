@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { CalibrationResult, Demographics, GazeSource } from "../types";
 import { useGaze } from "../gaze/GazeContext";
 import { GazeTrail } from "./GazeTrail";
+import { WebGazerCalibrator } from "./WebGazerCalibrator";
 import styles from "./CalibrationPage.module.css";
 
 interface Props {
@@ -13,57 +14,30 @@ interface Props {
 
 type Phase = "intro" | "running" | "done";
 
-// Calibration is driven by the underlying gaze library:
-//  - EyeGesturesLite renders ~25 red points itself and reports completion
-//    via the calibration flag in its onGaze callback (false during, true after).
-//  - MouseDebug needs no calibration; the page just records the timestamps.
+// Calibration is driven from the React app for both gaze sources:
+//  - WebGazer: WebGazerCalibrator renders a 3x3 grid of click targets. Each
+//    click feeds (x, y, 'click') into webgazer.recordScreenPosition, training
+//    the regression model. The grid moves to phase "done" automatically.
+//  - MouseDebug: no calibration; phase advances immediately.
 export function CalibrationPage({
   demographics,
   gazeSource,
   onChangeSource,
   onDone,
 }: Props) {
-  const { isCalibrating, isActive, calibCount, calibMax, recalibrate } = useGaze();
+  const { clearCalibration } = useGaze();
   const [phase, setPhase] = useState<Phase>("intro");
   const [pickedSource, setPickedSource] = useState<GazeSource>(gazeSource);
-  const [libStatus, setLibStatus] = useState<string>("");
-  const [libError, setLibError] = useState<string>("");
   const startTimeRef = useRef<number>(0);
-
-  // Mirror the EyeGesturesLite #status / #error DOM elements into React state.
-  // The library writes load/init progress to them; this is the only signal we
-  // get while waiting for MediaPipe + webcam to come up.
-  useEffect(() => {
-    if (phase !== "running" || gazeSource !== "EyeGesturesLite") return;
-    const statusEl = document.getElementById("status");
-    const errorEl = document.getElementById("error");
-    if (!statusEl && !errorEl) return;
-    const tick = () => {
-      setLibStatus((statusEl?.textContent || "").trim());
-      setLibError((errorEl?.textContent || "").trim());
-    };
-    tick();
-    const id = window.setInterval(tick, 250);
-    return () => window.clearInterval(id);
-  }, [phase, gazeSource]);
-
-  // Move from "running" to "done" when the library finishes calibrating.
-  // For MouseDebug we mark done as soon as the running phase starts.
-  useEffect(() => {
-    if (phase !== "running") return;
-    if (gazeSource === "MouseDebug") {
-      setPhase("done");
-      return;
-    }
-    if (isActive && !isCalibrating) {
-      setPhase("done");
-    }
-  }, [phase, gazeSource, isActive, isCalibrating]);
 
   const begin = () => {
     startTimeRef.current = Date.now();
     if (pickedSource !== gazeSource) onChangeSource(pickedSource);
-    setPhase("running");
+    if (pickedSource === "MouseDebug") {
+      setPhase("done");
+    } else {
+      setPhase("running");
+    }
   };
 
   const finish = (success: boolean) => {
@@ -75,8 +49,8 @@ export function CalibrationPage({
       calibration_end_time: end,
       calibration_success: success,
       calibration_method:
-        gazeSource === "EyeGesturesLite"
-          ? "EyeGesturesLite built-in calibration"
+        gazeSource === "WebGazer"
+          ? "WebGazer 9-dot click calibration"
           : "MouseDebug (no calibration)",
       notes: "",
     };
@@ -94,11 +68,11 @@ export function CalibrationPage({
             <input
               type="radio"
               name="src"
-              value="EyeGesturesLite"
-              checked={pickedSource === "EyeGesturesLite"}
-              onChange={() => setPickedSource("EyeGesturesLite")}
+              value="WebGazer"
+              checked={pickedSource === "WebGazer"}
+              onChange={() => setPickedSource("WebGazer")}
             />
-            EyeGesturesLite (webcam)
+            WebGazer (webcam)
           </label>
           <label>
             <input
@@ -112,11 +86,11 @@ export function CalibrationPage({
           </label>
         </div>
 
-        {pickedSource === "EyeGesturesLite" ? (
+        {pickedSource === "WebGazer" ? (
           <p className={styles.note}>
-            EyeGesturesLite will request webcam access, then display red points
-            across the screen. Look at each one and keep your head still — the
-            library finishes calibration automatically.
+            WebGazer will request webcam access, then display 9 red dots across
+            the screen. Look at each one and click it 5 times — keep your head
+            still while clicking. Dots turn green when complete.
           </p>
         ) : (
           <p className={styles.note}>
@@ -133,94 +107,34 @@ export function CalibrationPage({
   }
 
   if (phase === "running") {
-    const progressPct =
-      calibMax > 0 ? Math.min(100, (calibCount / calibMax) * 100) : 0;
-    return (
-      <>
-        {gazeSource === "EyeGesturesLite" && (
-          <div className={styles.runningBackdrop} />
-        )}
-        {gazeSource === "EyeGesturesLite" && <GazeTrail />}
-        <div className={styles.runningOverlay}>
-        <div className={styles.runningCard}>
-          <h2>Calibrating…</h2>
-          <p>
-            Look at each red point as it appears. The library finishes
-            automatically; this screen will advance when it's done.
-          </p>
-          {gazeSource === "EyeGesturesLite" && calibMax > 0 && (
-            <div className={styles.progressRow}>
-              <div className={styles.progressCount}>
-                {calibCount} / {calibMax}
-              </div>
-              <div className={styles.progressBar}>
-                <div
-                  className={styles.progressFill}
-                  style={{ width: `${progressPct}%` }}
-                />
-              </div>
-            </div>
-          )}
-          {gazeSource === "EyeGesturesLite" && !isActive && (
-            <p className={styles.hint}>
-              Waiting for the webcam — accept the browser permission prompt if
-              you haven't already.
-            </p>
-          )}
-          {gazeSource === "EyeGesturesLite" && libStatus && (
-            <p className={styles.libStatus}>EyeGesturesLite: {libStatus}</p>
-          )}
-          {gazeSource === "EyeGesturesLite" && libError && (
-            <>
-              <p className={styles.libError}>Error: {libError}</p>
-              {/^.*permission.*denied/i.test(libError) && (
-                <p className={styles.hint}>
-                  Allow webcam access in your browser (address-bar camera icon)
-                  and in macOS System Settings → Privacy & Security → Camera,
-                  then reload the page (Cmd+Shift+R).
-                </p>
-              )}
-            </>
-          )}
-          {gazeSource === "EyeGesturesLite" && !isActive && (
-            <button
-              className={styles.secondary}
-              onClick={() => setPhase("intro")}
-            >
-              Back
-            </button>
-          )}
-        </div>
-        </div>
-      </>
-    );
+    return <WebGazerCalibrator onComplete={() => setPhase("done")} />;
   }
 
   // phase === "done"
   return (
     <>
-      {gazeSource === "EyeGesturesLite" && <GazeTrail />}
-    <div className={styles.intro}>
-      <h2>Calibration Complete</h2>
-      <p>Verify accuracy by looking around. Continue, or recalibrate.</p>
-      <div className={styles.row}>
-        <button className={styles.primary} onClick={() => finish(true)}>
-          Continue
-        </button>
-        {gazeSource === "EyeGesturesLite" && (
-          <button
-            className={styles.secondary}
-            onClick={() => {
-              startTimeRef.current = Date.now();
-              recalibrate();
-              setPhase("running");
-            }}
-          >
-            Recalibrate
+      {gazeSource === "WebGazer" && <GazeTrail />}
+      <div className={styles.intro}>
+        <h2>Calibration Complete</h2>
+        <p>Verify accuracy by looking around. Continue, or recalibrate.</p>
+        <div className={styles.row}>
+          <button className={styles.primary} onClick={() => finish(true)}>
+            Continue
           </button>
-        )}
+          {gazeSource === "WebGazer" && (
+            <button
+              className={styles.secondary}
+              onClick={() => {
+                startTimeRef.current = Date.now();
+                clearCalibration();
+                setPhase("running");
+              }}
+            >
+              Recalibrate
+            </button>
+          )}
+        </div>
       </div>
-    </div>
     </>
   );
 }

@@ -8,10 +8,9 @@ interface Props {
   fadeMs?: number;
 }
 
-// Canvas overlay that paints the last N gaze samples as soft fading circles —
-// the "heatmap-like trail" visible in the EyeGesturesLite demo
-// (https://eyegestures.com/tryLite). Mounted only during calibration so the
-// actual text-entry experiment is not contaminated by visible gaze feedback.
+// Canvas overlay that paints the last N gaze samples as soft fading circles.
+// Mounted only on the post-calibration verification screen so the actual
+// text-entry experiment is not contaminated by visible gaze feedback.
 export function GazeTrail({ maxPoints = 80, fadeMs = 1800 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const { subscribe } = useGaze();
@@ -82,8 +81,6 @@ export function GazeTrail({ maxPoints = 80, fadeMs = 1800 }: Props) {
         position: "fixed",
         inset: 0,
         pointerEvents: "none",
-        // Below the library's red/blue cursor (z-index: 1000 from eyegestures.css)
-        // but above the rest of the page so the trail is visible.
         zIndex: 900,
       }}
     />

@@ -9,7 +9,7 @@ import {
 } from "react";
 import type { GazeSample, GazeSource } from "../types";
 import { useMouseDebugGaze } from "./MouseDebugProvider";
-import { useEyeGesturesLiteGaze } from "./EyeGesturesLiteProvider";
+import { useWebGazerGaze } from "./WebGazerProvider";
 import { OneEuroFilter } from "../utils/oneEuroFilter";
 
 // Public shape exposed to consumers.
@@ -25,23 +25,22 @@ interface GazeContextValue {
   source: GazeSource;
   // True if the provider reports it is actively producing samples.
   isActive: boolean;
-  // True while the underlying gaze library is in its calibration phase.
-  // Always false for MouseDebug.
-  isCalibrating: boolean;
-  // Number of calibration points completed so far (0 .. calibMax). Always 0
-  // for MouseDebug.
-  calibCount: number;
-  // Total number of calibration points the library will visit. 0 until known.
-  calibMax: number;
-  // Trigger a fresh calibration. No-op for MouseDebug.
-  recalibrate: () => void;
+  // True once the underlying gaze library is ready to accept calibration /
+  // produce samples (camera + model loaded). Always true for MouseDebug.
+  isReady: boolean;
+  // Last initialisation error from the provider, if any.
+  error: string | null;
+  // Record one calibration sample at (x, y) viewport px. No-op for MouseDebug.
+  recordCalibrationPoint: (x: number, y: number) => void;
+  // Drop all calibration training data (full reset). No-op for MouseDebug.
+  clearCalibration: () => void;
 }
 
 const GazeContext = createContext<GazeContextValue | null>(null);
 
 interface ProviderProps {
   source: GazeSource;
-  // Hint for providers that throttle (notably MouseDebug). EyeGesturesLite pushes raw.
+  // Hint for providers that throttle (notably MouseDebug). WebGazer pushes raw.
   samplingIntervalMs: number;
   // One-Euro filter applied to the combined gaze point (x, y) before fan-out.
   // When disabled, the raw point is passed through unchanged.
@@ -128,16 +127,22 @@ export function GazeProvider({
   }, []);
 
   useMouseDebugGaze(source === "MouseDebug" ? handleSample : null, samplingIntervalMs);
-  const eyeGestures = useEyeGesturesLiteGaze(
-    source === "EyeGesturesLite" ? handleSample : null,
+  const webGazer = useWebGazerGaze(
+    source === "WebGazer" ? handleSample : null,
   );
-  const isActive = source === "MouseDebug" ? true : eyeGestures.active;
-  const isCalibrating = source === "EyeGesturesLite" ? eyeGestures.isCalibrating : false;
-  const calibCount = source === "EyeGesturesLite" ? eyeGestures.calibCount : 0;
-  const calibMax = source === "EyeGesturesLite" ? eyeGestures.calibMax : 0;
-  const recalibrate = useCallback(() => {
-    if (source === "EyeGesturesLite") eyeGestures.recalibrate();
-  }, [source, eyeGestures]);
+  const isActive = source === "MouseDebug" ? true : webGazer.active;
+  const isReady = source === "MouseDebug" ? true : webGazer.ready;
+  const error = source === "WebGazer" ? webGazer.error : null;
+
+  const recordCalibrationPoint = useCallback(
+    (x: number, y: number) => {
+      if (source === "WebGazer") webGazer.recordPoint(x, y);
+    },
+    [source, webGazer],
+  );
+  const clearCalibration = useCallback(() => {
+    if (source === "WebGazer") webGazer.clearCalibration();
+  }, [source, webGazer]);
 
   const subscribe = useCallback((cb: (s: GazeSample) => void) => {
     subscribersRef.current.add(cb);
@@ -159,10 +164,10 @@ export function GazeProvider({
     subscribe,
     source,
     isActive,
-    isCalibrating,
-    calibCount,
-    calibMax,
-    recalibrate,
+    isReady,
+    error,
+    recordCalibrationPoint,
+    clearCalibration,
   };
 
   return <GazeContext.Provider value={value}>{children}</GazeContext.Provider>;

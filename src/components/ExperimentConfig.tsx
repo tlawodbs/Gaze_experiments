@@ -104,7 +104,7 @@ export function ExperimentConfig({ initial, onSubmit }: Props) {
           value={cfg.gaze_source}
           onChange={(e) => set("gaze_source", e.target.value as GazeSource)}
         >
-          <option value="EyeGesturesLite">EyeGesturesLite (browser)</option>
+          <option value="WebGazer">WebGazer (browser)</option>
           <option value="MouseDebug">MouseDebug</option>
         </select>
       </label>

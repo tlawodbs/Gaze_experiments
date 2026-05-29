@@ -10,7 +10,8 @@ import type {
 } from "../types";
 import { KeyboardLayout } from "./KeyboardLayout";
 import { DebugOverlay } from "./DebugOverlay";
-import { GazeTrail } from "./GazeTrail";
+import { GazeCursor } from "./GazeCursor";
+import { WebGazerCalibrator } from "./WebGazerCalibrator";
 import styles from "./ExperimentSession.module.css";
 
 interface Props {
@@ -31,10 +32,7 @@ export function ExperimentSession({
   const {
     subscribe,
     isActive,
-    isCalibrating,
-    calibCount,
-    calibMax,
-    recalibrate,
+    clearCalibration,
     source: gazeSource,
   } = useGaze();
 
@@ -58,17 +56,12 @@ export function ExperimentSession({
   const trialActiveRef = useRef<boolean>(false);
   const inputIndexRef = useRef<number>(0);
 
-  // Mid-experiment recalibration overlay state.
+  // Mid-experiment recalibration overlay state. The 9-dot calibrator fires
+  // onComplete when all dots are clicked the required number of times; until
+  // then we suspend trial input via recalibActiveRef.
   const [recalibActive, setRecalibActive] = useState(false);
   const recalibActiveRef = useRef<boolean>(false);
   recalibActiveRef.current = recalibActive;
-  // Once the library reports calibration finished while the overlay is open,
-  // close it automatically and let the trial resume.
-  useEffect(() => {
-    if (recalibActive && !isCalibrating && isActive) {
-      setRecalibActive(false);
-    }
-  }, [recalibActive, isCalibrating, isActive]);
 
   const targetSentence = sentences[trialIndex] ?? "";
 
@@ -254,16 +247,16 @@ export function ExperimentSession({
         <div className={styles.metaRight}>
           gaze: <strong>{config.gaze_source}</strong>{" "}
           {isActive ? <span className={styles.dotOk} /> : <span className={styles.dotBad} />}
-          {gazeSource === "EyeGesturesLite" && (
+          {gazeSource === "WebGazer" && (
             <button
               type="button"
               className={styles.recalibBtn}
               onClick={() => {
+                clearCalibration();
                 setRecalibActive(true);
-                recalibrate();
               }}
               disabled={recalibActive}
-              title="Pause the trial and re-run EyeGesturesLite calibration."
+              title="Pause the trial and re-run WebGazer calibration."
             >
               {recalibActive ? "Recalibrating…" : "Recalibrate"}
             </button>
@@ -298,6 +291,11 @@ export function ExperimentSession({
         onLayout={onKeyboardLayout}
       />
 
+      {/* Live gaze cursor so the participant can see where the system thinks
+          they are looking while typing. Hidden during recalibration (the
+          calibrator owns the screen then). */}
+      {!recalibActive && <GazeCursor />}
+
       {showDebugOverlay && (
         <DebugOverlay
           gazeX={lastGazeRef.current.x}
@@ -309,35 +307,8 @@ export function ExperimentSession({
         />
       )}
 
-      {recalibActive && gazeSource === "EyeGesturesLite" && (
-        <>
-          <div className={styles.recalibBackdrop} />
-          <GazeTrail />
-          <div className={styles.recalibOverlay}>
-            <div className={styles.recalibCard}>
-              <h2>Recalibrating…</h2>
-              <p>
-                Follow each red point until the bar fills. The trial resumes
-                automatically when calibration finishes.
-              </p>
-              {calibMax > 0 && (
-                <div className={styles.progressRow}>
-                  <div className={styles.progressCount}>
-                    {calibCount} / {calibMax}
-                  </div>
-                  <div className={styles.progressBar}>
-                    <div
-                      className={styles.progressFill}
-                      style={{
-                        width: `${Math.min(100, (calibCount / calibMax) * 100)}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </>
+      {recalibActive && gazeSource === "WebGazer" && (
+        <WebGazerCalibrator onComplete={() => setRecalibActive(false)} />
       )}
     </div>
   );

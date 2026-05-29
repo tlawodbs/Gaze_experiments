@@ -8,9 +8,9 @@ The system captures **raw** behavior — no auto-correct, no backspace, no
 predictive input — so that errors and gaze trajectories are preserved.
 
 Built with **React + TypeScript + Vite**. Gaze tracking is provided by
-[EyeGesturesLite](https://github.com/NativeSensors/EyeGesturesLite), a
-browser-native JavaScript port of EyeGestures, with a **MouseDebug** fallback
-for development.
+[WebGazer.js](https://github.com/brownhci/WebGazer) (TensorFlow.js FaceMesh +
+eye-pixel patches + ridge-regression mapping to screen coordinates), with a
+**MouseDebug** fallback for development.
 
 ---
 
@@ -22,12 +22,11 @@ npm run dev
 ```
 
 Open the printed URL (usually `http://localhost:5173`). On the calibration
-screen choose either **EyeGesturesLite** (real webcam-based gaze) or
-**MouseDebug** (mouse cursor stands in for gaze).
+screen choose either **WebGazer** (real webcam-based gaze) or **MouseDebug**
+(mouse cursor stands in for gaze).
 
-EyeGesturesLite is loaded from CDN in `index.html`; no Python service or
-WebSocket bridge is required. The browser will ask for webcam permission when
-calibration begins.
+WebGazer.js is bundled from npm; no Python service or WebSocket bridge is
+required. The browser will ask for webcam permission when calibration begins.
 
 ---
 
@@ -38,10 +37,11 @@ The app walks each participant through five stages:
 1. **Demographic Session** — `DemographicsForm` collects participant info and
    exports `demographics.json`.
 2. **Gaze Calibration Session** — `CalibrationPage` lets the participant pick
-   the gaze source. For **EyeGesturesLite**, the library's built-in
-   calibration runs (red points across the screen, blue cursor that improves
-   as you gaze at each one) and the page advances automatically when the
-   library reports calibration complete. The result is exported as
+   the gaze source. For **WebGazer**, a 3×3 grid of red dots appears across
+   the screen. Look at each one and click it 5 times — every click feeds a
+   training sample into WebGazer's ridge-regression model. Dots turn orange
+   while partially trained and green once complete; the page advances
+   automatically when all nine dots are green. The result is exported as
    `calibration.json`.
 3. **Experiment Configuration** — `ExperimentConfig` sets selection keys,
    keyboard geometry, sampling interval, dataset file, and exports
@@ -56,30 +56,28 @@ The app walks each participant through five stages:
 
 ## Gaze sources
 
-### EyeGesturesLite (real gaze input)
+### WebGazer (real gaze input)
 
-EyeGesturesLite runs entirely in the browser. The library and its runtime
-peer dependencies are shipped locally under `public/vendor/` so they are not
-blocked by ad-blockers, corporate firewalls, or privacy extensions:
+WebGazer.js runs entirely in the browser. It is bundled by Vite from the
+`webgazer` npm dependency, so no script tags or vendored assets are needed
+in `index.html`. The library creates its own `<video id="webgazerVideoFeed">`
+and face-overlay nodes when `webgazer.begin()` runs.
 
-```
-public/vendor/
-  eyegestures.css
-  eyegestures.js     # downloaded from https://eyegestures.com/eyegestures.js
-  ml.min.js          # downloaded from https://www.lactame.com/lib/ml/6.0.0/
-  math.min.js        # downloaded from cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/
-```
+The provider (`src/gaze/WebGazerProvider.ts`) wraps the singleton library:
 
-`index.html` references them with absolute paths (`/vendor/...`), exposing
-`window.EyeGestures` before React mounts.
+- `webgazer.begin()` boots the camera + TensorFlow.js FaceMesh model.
+- `webgazer.setGazeListener((data) => …)` receives a `{x, y}` viewport-pixel
+  prediction on every animation frame; the provider forwards each as a
+  `GazeSample`.
+- `webgazer.applyKalmanFilter(true)` enables WebGazer's built-in smoothing;
+  the project's One-Euro filter is layered on top in `GazeContext`.
+- `webgazer.recordScreenPosition(x, y, "click")` adds one calibration sample
+  to the ridge regression. The 9-dot calibrator drives this on every click.
+- `webgazer.clearData()` wipes the trained mapping for a recalibration cycle.
 
-The provider (`src/gaze/EyeGesturesLiteProvider.ts`) instantiates the library
-against the hidden `<video id="eyegestures-video">` element, forwards every
-`onGaze([x, y], calibration)` sample as a `GazeSample`, and exposes the
-calibration flag plus a `recalibrate()` action via `GazeContext`.
-
-Calibration is rendered by EyeGesturesLite itself and matches the reference
-implementation in the upstream repository.
+Calibration UI is rendered by `src/components/WebGazerCalibrator.tsx` — a 3×3
+grid of click targets, each requiring 5 clicks. Mid-experiment recalibration
+reuses the same component from `ExperimentSession`.
 
 ### MouseDebug (development)
 
@@ -94,9 +92,10 @@ checkbox in the top bar to display live values for `gaze_x`, `gaze_y`,
 
 1. Launch `npm run dev`.
 2. Fill out the participant demographic form.
-3. On the calibration page, pick **EyeGesturesLite** or **MouseDebug**, then
-   click **Begin Calibration**. For EyeGesturesLite, follow the red dots
-   until the screen advances automatically; mark success/failure when done.
+3. On the calibration page, pick **WebGazer** or **MouseDebug**, then click
+   **Begin Calibration**. For WebGazer, look at each red dot and click it 5
+   times — the screen advances automatically when all nine dots are green;
+   mark success/failure when done.
 4. Open the configuration screen:
    - **# sentences per session**: how many target sentences to sample.
    - **Selection key**: physical key that confirms the currently hovered key.
@@ -169,7 +168,7 @@ One row per gaze sample (or discrete event) for that trial.
 | `session_id`      | from demographics                                                  |
 | `trial_id`        | `trial_001` …                                                      |
 | `target_sentence` | sentence shown to the participant                                  |
-| `left_eye_x/y`    | viewport px or null (EyeGesturesLite reports a single gaze point)  |
+| `left_eye_x/y`    | viewport px or null (WebGazer reports a single gaze point)         |
 | `right_eye_x/y`   | viewport px or null                                                |
 | `gaze_x/y`        | viewport px combined point (null if unavailable)                   |
 | `hovered_key`     | key under gaze or null                                             |
@@ -223,7 +222,8 @@ src/
   App.tsx                      session state machine
   components/
     DemographicsForm.tsx
-    CalibrationPage.tsx        drives EyeGesturesLite's built-in calibration
+    CalibrationPage.tsx        intro + post-calibration verification
+    WebGazerCalibrator.tsx     9-dot click calibration overlay
     ExperimentConfig.tsx
     KeyboardLayout.tsx         circular QWERTY, reports key geometry
     ExperimentSession.tsx      gaze ↔ keyboard ↔ logger glue
@@ -231,7 +231,7 @@ src/
     DebugOverlay.tsx
   gaze/
     GazeContext.tsx            fans out samples + computes midpoint
-    EyeGesturesLiteProvider.ts wraps the EyeGesturesLite browser library
+    WebGazerProvider.ts        wraps the WebGazer.js npm library
     MouseDebugProvider.ts      mouse-as-gaze for development
   logger/
     DataLogger.ts              per-trial buffers + CSV export
@@ -261,7 +261,7 @@ frame, keeping the input path snappy.
 
 ## Notes & limitations
 
-- EyeGesturesLite uses the browser's `getUserMedia` API; the user must grant
+- WebGazer.js uses the browser's `getUserMedia` API; the user must grant
   webcam access before calibration can run.
 - No backspace, no correction. Mistakes are recorded as-is.
 - The app stores nothing server-side; all data stays in the browser until
