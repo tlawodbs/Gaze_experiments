@@ -2,30 +2,44 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useGaze } from "../gaze/GazeContext";
 import { DataLogger, formatTrialId } from "../logger/DataLogger";
 import type {
-  Demographics,
   ExperimentConfigData,
   GazeSample,
   KeyDef,
+  SessionType,
   TrialSummary,
 } from "../types";
 import { KeyboardLayout } from "./KeyboardLayout";
 import { DebugOverlay } from "./DebugOverlay";
-import { GazeCursor } from "./GazeCursor";
 import { WebGazerCalibrator } from "./WebGazerCalibrator";
 import styles from "./ExperimentSession.module.css";
 
+// How long (ms) a key must remain the raw gaze hover before it becomes the
+// committed (highlighted + selectable) key. Debounces flicker; small enough to
+// not feel sluggish.
+const HOVER_DWELL_MS = 150;
+
 interface Props {
-  demographics: Demographics;
   config: ExperimentConfigData;
-  sentences: string[];
+  // The words shown in this session, one per trial.
+  words: string[];
+  // Session context — drives the header and the data tagging in the logger.
+  sessionType: SessionType;
+  sessionIndex: number; // 1-based within its type
+  sessionTotal: number; // total sessions of this type for the day
+  // Shared logger for the whole day's run. The session has already been started
+  // (logger.startSession) by the parent before this component mounts.
+  logger: DataLogger;
   showDebugOverlay: boolean;
-  onFinished: (logger: DataLogger) => void;
+  onFinished: () => void;
 }
 
 export function ExperimentSession({
-  demographics,
   config,
-  sentences,
+  words,
+  sessionType,
+  sessionIndex,
+  sessionTotal,
+  logger,
   showDebugOverlay,
   onFinished,
 }: Props) {
@@ -36,25 +50,52 @@ export function ExperimentSession({
     source: gazeSource,
   } = useGaze();
 
-  // Stable logger across the entire session.
-  const loggerRef = useRef<DataLogger>(
-    new DataLogger(demographics.participant_id, demographics.session_id),
-  );
+  // The shared day-logger, held in a ref so effects don't re-bind on parent
+  // re-renders (its identity is stable for the whole run anyway).
+  const loggerRef = useRef<DataLogger>(logger);
+  loggerRef.current = logger;
 
-  const [trialIndex, setTrialIndex] = useState(0); // 0-based
+  const [trialIndex, setTrialIndex] = useState(0); // 0-based within the session
   const [typedText, setTypedText] = useState("");
   const [keyDefs, setKeyDefs] = useState<KeyDef[]>([]);
 
   // Refs that are read in event handlers without re-binding effects each render.
+  // hoveredKeyRef holds the *committed* (debounced) hover used for highlight +
+  // selection; rawHoverRef is the instantaneous hover, logged per sample.
   const hoveredKeyRef = useRef<string | null>(null);
+  const rawHoverRef = useRef<string | null>(null);
+  // Dwell-debounce bookkeeping: a candidate key must remain the raw hover for
+  // HOVER_DWELL_MS before it becomes the committed hover, so the highlight does
+  // not flicker as gaze jitters across key boundaries.
+  const pendingKeyRef = useRef<string | null>(null);
+  const pendingSinceRef = useRef<number>(0);
   const lastGazeRef = useRef<{ x: number | null; y: number | null }>({ x: null, y: null });
   const lastSampleRef = useRef<GazeSample | null>(null);
   const keyDefsRef = useRef<KeyDef[]>([]);
   keyDefsRef.current = keyDefs;
+  // char → key centre, for logging the current target's position alongside gaze.
+  const keyPosRef = useRef<Map<string, { cx: number; cy: number }>>(new Map());
   const typedRef = useRef<string>("");
   typedRef.current = typedText;
   const trialActiveRef = useRef<boolean>(false);
   const inputIndexRef = useRef<number>(0);
+  // The currently-held tracked key (selection/finish), captured at key-down so
+  // key-up can emit one row carrying both the down-time and up-time.
+  const keyDownRef = useRef<{
+    key: string;
+    isFinish: boolean;
+    downTime: number;
+    gx: number | null;
+    gy: number | null;
+    hovered: string | null;
+    targetChar: string | null;
+    targetKeyX: number | null;
+    targetKeyY: number | null;
+    selectedChar: string | null;
+    inputIndex: number | null;
+    typedSoFar: string | null;
+    willComplete: boolean;
+  } | null>(null);
 
   // Mid-experiment recalibration overlay state. The 9-dot calibrator fires
   // onComplete when all dots are clicked the required number of times; until
@@ -63,31 +104,43 @@ export function ExperimentSession({
   const recalibActiveRef = useRef<boolean>(false);
   recalibActiveRef.current = recalibActive;
 
-  const targetSentence = sentences[trialIndex] ?? "";
+  const targetWord = words[trialIndex] ?? "";
+  // Latest target word, readable from gaze/key handlers without re-binding.
+  const targetWordRef = useRef<string>(targetWord);
+  targetWordRef.current = targetWord;
 
-  // Display state for the hovered key — bumped from raw subscription via rAF.
+  // The current intended letter (next to enter) and its key centre.
+  const currentTarget = (): { char: string | null; x: number | null; y: number | null } => {
+    const ch = targetWordRef.current[typedRef.current.length] ?? null;
+    if (ch === null) return { char: null, x: null, y: null };
+    const pos = keyPosRef.current.get(ch);
+    return { char: ch, x: pos?.cx ?? null, y: pos?.cy ?? null };
+  };
+
+  // Display state for the hovered key, driven by the debounced committed hover.
   const [hoveredKeyDisplay, setHoveredKeyDisplay] = useState<string | null>(null);
-  const pendingHoverRef = useRef<string | null>(null);
-  const rafScheduledRef = useRef<boolean>(false);
 
   // Hover detection helper — pure math, no DOM measurement on hot path.
-  // Each key is treated as an ellipse with semi-axes (halfW, halfH); the
-  // gaze point is inside when (dx/halfW)^2 + (dy/halfH)^2 <= 1. Letter keys
-  // are circles (halfW = halfH); the space key is a wide pill. When multiple
-  // keys match the gaze, the one with the smallest normalised squared
-  // distance wins, which gives a fair tie-break for the wider space key.
+  // Each key's hit region is a rectangle centred at (cx, cy) with half-extents
+  // (halfW, halfH). Those half-extents already include half the inter-key
+  // spacing (see KeyboardLayout), so neighbouring rectangles meet exactly at the
+  // midpoints on BOTH axes and therefore tile the keyboard area with no gaps —
+  // including the diagonal corners that a circular/elliptical region would leave
+  // dead. The gaze point is inside when |dx| <= halfW and |dy| <= halfH; if it
+  // somehow falls inside more than one (only possible on a shared edge), the key
+  // whose centre is closest wins.
   const computeHover = useCallback(
     (gx: number | null, gy: number | null): string | null => {
       if (gx === null || gy === null) return null;
-      let best: { key: string; norm: number } | null = null;
+      let best: { key: string; d: number } | null = null;
       const keys = keyDefsRef.current;
       for (let i = 0; i < keys.length; i++) {
         const k = keys[i];
-        const dx = (gx - k.cx) / k.halfW;
-        const dy = (gy - k.cy) / k.halfH;
-        const norm = dx * dx + dy * dy;
-        if (norm <= 1) {
-          if (!best || norm < best.norm) best = { key: k.char, norm };
+        const dx = gx - k.cx;
+        const dy = gy - k.cy;
+        if (Math.abs(dx) <= k.halfW && Math.abs(dy) <= k.halfH) {
+          const d = dx * dx + dy * dy;
+          if (!best || d < best.d) best = { key: k.char, d };
         }
       }
       return best ? best.key : null;
@@ -95,23 +148,35 @@ export function ExperimentSession({
     [],
   );
 
-  // Subscribe to gaze samples. Logs every sample, updates hovered key.
+  // Subscribe to gaze samples. Logs every sample (with the raw instantaneous
+  // hover for data fidelity) and updates the debounced committed hover that
+  // drives the highlight and selection.
   useEffect(() => {
     const unsub = subscribe((sample) => {
       lastSampleRef.current = sample;
       lastGazeRef.current = { x: sample.x, y: sample.y };
-      const hovered = computeHover(sample.x, sample.y);
-      hoveredKeyRef.current = hovered;
-      pendingHoverRef.current = hovered;
-      if (!rafScheduledRef.current) {
-        rafScheduledRef.current = true;
-        requestAnimationFrame(() => {
-          rafScheduledRef.current = false;
-          setHoveredKeyDisplay(pendingHoverRef.current);
-        });
+      const raw = computeHover(sample.x, sample.y);
+      rawHoverRef.current = raw;
+
+      // Dwell debounce: only commit a new hover once it has been the raw hover
+      // continuously for HOVER_DWELL_MS. This adds a little latency but stops the
+      // highlight from flashing as gaze flickers between adjacent keys.
+      const now = sample.timestamp;
+      if (raw === hoveredKeyRef.current) {
+        // Already committed — keep the candidate aligned so brief excursions
+        // need the full dwell again.
+        pendingKeyRef.current = raw;
+        pendingSinceRef.current = now;
+      } else if (raw !== pendingKeyRef.current) {
+        pendingKeyRef.current = raw;
+        pendingSinceRef.current = now;
+      } else if (now - pendingSinceRef.current >= HOVER_DWELL_MS) {
+        hoveredKeyRef.current = raw;
+        setHoveredKeyDisplay(raw);
       }
+
       if (trialActiveRef.current) {
-        loggerRef.current.logGaze(sample, hovered);
+        loggerRef.current.logGaze(sample, raw, currentTarget());
       }
     });
     return unsub;
@@ -119,12 +184,12 @@ export function ExperimentSession({
 
   // Start a new trial whenever trialIndex changes.
   useEffect(() => {
-    if (trialIndex >= sentences.length) return;
+    if (trialIndex >= words.length) return;
     setTypedText("");
     typedRef.current = "";
     inputIndexRef.current = 0;
-    // trialIndex 0 is the practice trial → logged as trial_000.
-    loggerRef.current.startTrial(trialIndex, sentences[trialIndex]);
+    // Trials are 1-based within the session (trial_001 .. trial_0NN).
+    loggerRef.current.startTrial(trialIndex + 1, words[trialIndex]);
     trialActiveRef.current = true;
     return () => {
       // If we unmount mid-trial, end it so files are still produced.
@@ -133,67 +198,142 @@ export function ExperimentSession({
         trialActiveRef.current = false;
       }
     };
-  }, [trialIndex, sentences]);
+  }, [trialIndex, words]);
 
-  // Physical key handling: selection_key appends, finish_sentence_key ends trial.
+  // Physical key handling. Each press is logged as TWO rows — a *_down event at
+  // key-down and a *_up event at key-up — so the keyboard down-time and up-time
+  // each appear as their own time-ordered entry. The character is appended on
+  // key-down (responsive), but the trial only advances on key-up, so a
+  // word-completing press records both its down and up rows within the same
+  // trial before we move on. The selection key enters the highlighted key; the
+  // word advances automatically once all letters are entered.
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
+    const keyDownInfo = keyDownRef;
+
+    const onKeyDown = (e: KeyboardEvent) => {
       const k = e.key === " " ? "Space" : e.key;
       const isSelect = k === config.selection_key;
       const isFinish = k === config.finish_sentence_key;
       if (!isSelect && !isFinish) return;
-      // Prevent default for Space so it doesn't scroll, and for Enter inside form.
+      // Prevent default for Space (scroll) / Enter (form submit).
       e.preventDefault();
-      if (!trialActiveRef.current) return;
-      // Suspend input while a recalibration is in progress so participants
-      // don't accidentally enter characters while looking at calibration dots.
-      if (recalibActiveRef.current) return;
+      // Ignore OS auto-repeat and any press while another tracked key is held.
+      if (e.repeat || keyDownInfo.current) return;
+      if (!trialActiveRef.current || recalibActiveRef.current) return;
 
       const hovered = hoveredKeyRef.current;
       const { x: gx, y: gy } = lastGazeRef.current;
+      const downTime = Date.now();
+      // Intended target for THIS press (captured before the character append).
+      const tgt = currentTarget();
 
-      if (isFinish) {
-        loggerRef.current.logGazeEvent("finish_key_down", gx, gy, hovered);
-        endCurrentTrial();
-        return;
+      let selectedChar: string | null = null;
+      let inputIndex: number | null = null;
+      let typedSoFar: string | null = null;
+      let willComplete = false;
+
+      if (isSelect && hovered !== null) {
+        const newTyped = typedRef.current + hovered;
+        typedRef.current = newTyped;
+        setTypedText(newTyped);
+        inputIndexRef.current += 1;
+        selectedChar = hovered;
+        inputIndex = inputIndexRef.current;
+        typedSoFar = newTyped;
+        const target = words[trialIndex] ?? "";
+        willComplete = target.length > 0 && newTyped.length >= target.length;
       }
 
-      // selection_key path
-      loggerRef.current.logGazeEvent("selection_key_down", gx, gy, hovered);
-      if (hovered === null) {
-        loggerRef.current.logGazeEvent("no_hover_selection", gx, gy, null);
-        return; // Spec: log event but do not append a character.
-      }
-      const newTyped = typedRef.current + hovered;
-      typedRef.current = newTyped;
-      setTypedText(newTyped);
-      inputIndexRef.current += 1;
-      loggerRef.current.logCharacter({
-        inputIndex: inputIndexRef.current,
-        selectedCharacter: hovered,
-        hoveredKeyAtSelection: hovered,
-        gazeXAtSelection: gx,
-        gazeYAtSelection: gy,
-        physicalKeyPressed: k,
-        typedTextSoFar: newTyped,
+      keyDownInfo.current = {
+        key: k,
+        isFinish,
+        downTime,
+        gx,
+        gy,
+        hovered,
+        targetChar: tgt.char,
+        targetKeyX: tgt.x,
+        targetKeyY: tgt.y,
+        selectedChar,
+        inputIndex,
+        typedSoFar,
+        willComplete,
+      };
+
+      // Log the key-DOWN as its own row (down-time = event time).
+      loggerRef.current.logKeyEvent({
+        eventType: isFinish ? "finish_down" : "selection_down",
+        time: downTime,
+        physicalKey: k,
+        downTime,
+        upTime: null,
+        holdMs: null,
+        gazeX: gx,
+        gazeY: gy,
+        hoveredKey: hovered,
+        targetChar: tgt.char,
+        targetKeyX: tgt.x,
+        targetKeyY: tgt.y,
+        selectedCharacter: selectedChar,
+        inputIndex,
+        typedTextSoFar: typedSoFar,
       });
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      const k = e.key === " " ? "Space" : e.key;
+      const d = keyDownInfo.current;
+      if (!d || d.key !== k) return;
+      keyDownInfo.current = null;
+      if (!trialActiveRef.current) return;
+
+      const upTime = Date.now();
+      const { x: ugx, y: ugy } = lastGazeRef.current;
+      // target_char tracks the *current* target at this timestamp, so the column
+      // stays monotonic across the whole log (the gaze samples right after the
+      // key-down already advanced to the next letter). The letter this press
+      // aimed at is still recoverable from input_index.
+      const upTarget = currentTarget();
+      loggerRef.current.logKeyEvent({
+        eventType: d.isFinish ? "finish_up" : "selection_up",
+        time: upTime,
+        physicalKey: d.key,
+        downTime: d.downTime,
+        upTime,
+        holdMs: upTime - d.downTime,
+        gazeX: ugx,
+        gazeY: ugy,
+        hoveredKey: hoveredKeyRef.current,
+        targetChar: upTarget.char,
+        targetKeyX: upTarget.x,
+        targetKeyY: upTarget.y,
+        selectedCharacter: d.selectedChar,
+        inputIndex: d.inputIndex,
+        typedTextSoFar: d.typedSoFar,
+      });
+
+      if (d.isFinish || d.willComplete) endCurrentTrial();
     };
 
     const endCurrentTrial = () => {
       const finishedTyped = typedRef.current;
       const summary: TrialSummary | null = loggerRef.current.endTrial(finishedTyped);
       trialActiveRef.current = false;
-      if (summary && trialIndex + 1 >= sentences.length) {
-        // Last trial — hand the logger to parent.
-        onFinished(loggerRef.current);
+      if (summary && trialIndex + 1 >= words.length) {
+        // Last word of the session — tell the parent to advance.
+        onFinished();
       } else {
         setTrialIndex((i) => i + 1);
       }
     };
 
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [config.selection_key, config.finish_sentence_key, trialIndex, sentences.length, onFinished]);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [config.selection_key, config.finish_sentence_key, trialIndex, words.length, onFinished]);
 
   // Recompute key layout when window resizes / scrolls — the layout callback
   // also fires on first render.
@@ -210,11 +350,15 @@ export function ExperimentSession({
 
   const onKeyboardLayout = useCallback((keys: KeyDef[]) => {
     setKeyDefs(keys);
+    const m = new Map<string, { cx: number; cy: number }>();
+    for (const k of keys) m.set(k.char, { cx: k.cx, cy: k.cy });
+    keyPosRef.current = m;
+    loggerRef.current.setKeyboardLayout(keys);
   }, []);
 
   const targetCharIndex = typedText.length;
   const renderedTarget = useMemo(() => {
-    return targetSentence.split("").map((ch, i) => {
+    return targetWord.split("").map((ch, i) => {
       const cls =
         i < targetCharIndex
           ? typedText[i] === ch
@@ -229,20 +373,18 @@ export function ExperimentSession({
         </span>
       );
     });
-  }, [targetSentence, targetCharIndex, typedText]);
+  }, [targetWord, targetCharIndex, typedText]);
 
-  const trialId = formatTrialId(trialIndex);
-  // sentences[0] is the practice trial; the remaining N are the real ones.
-  const isPractice = trialIndex === 0;
-  const realTrialCount = Math.max(0, sentences.length - 1);
+  const trialId = formatTrialId(trialIndex + 1);
+  const sessionLabel =
+    sessionType === "practice" ? "Practice" : "Experiment";
 
   return (
     <div className={styles.root}>
       <header className={styles.header}>
         <div className={styles.metaLeft}>
-          {isPractice
-            ? `Practice · ${trialId}`
-            : `Trial ${trialIndex} / ${realTrialCount} · ${trialId}`}
+          {sessionLabel} session {sessionIndex} / {sessionTotal} · word{" "}
+          {trialIndex + 1} / {words.length}
         </div>
         <div className={styles.metaRight}>
           gaze: <strong>{config.gaze_source}</strong>{" "}
@@ -276,7 +418,7 @@ export function ExperimentSession({
         </div>
         <div className={styles.help}>
           Press <kbd>{config.selection_key}</kbd> to enter the highlighted key.
-          {" "}Press <kbd>{config.finish_sentence_key}</kbd> to finish this sentence.
+          {" "}The word advances automatically once all letters are entered.
           {" "}No correction — typing errors are preserved.
         </div>
       </section>
@@ -290,11 +432,6 @@ export function ExperimentSession({
         hoveredKey={hoveredKeyDisplay}
         onLayout={onKeyboardLayout}
       />
-
-      {/* Live gaze cursor so the participant can see where the system thinks
-          they are looking while typing. Hidden during recalibration (the
-          calibrator owns the screen then). */}
-      {!recalibActive && <GazeCursor />}
 
       {showDebugOverlay && (
         <DebugOverlay

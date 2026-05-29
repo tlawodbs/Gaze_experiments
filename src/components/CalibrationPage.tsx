@@ -44,7 +44,7 @@ export function CalibrationPage({
     const end = Date.now();
     const result: CalibrationResult = {
       participant_id: demographics.participant_id,
-      session_id: demographics.session_id,
+      day: demographics.day,
       calibration_start_time: startTimeRef.current || end,
       calibration_end_time: end,
       calibration_success: success,

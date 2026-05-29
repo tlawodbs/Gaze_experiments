@@ -1,16 +1,18 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { DemographicsForm } from "./components/DemographicsForm";
 import { CalibrationPage } from "./components/CalibrationPage";
 import { ExperimentConfig } from "./components/ExperimentConfig";
 import { ExperimentSession } from "./components/ExperimentSession";
+import { SessionIntro } from "./components/SessionIntro";
 import { ExportPage } from "./components/ExportPage";
 import { GazeProvider } from "./gaze/GazeContext";
 import type {
   CalibrationResult,
   Demographics,
   ExperimentConfigData,
+  SessionType,
 } from "./types";
-import type { DataLogger } from "./logger/DataLogger";
+import { DataLogger } from "./logger/DataLogger";
 import { sampleWithoutReplacement } from "./utils/sample";
 import styles from "./App.module.css";
 
@@ -18,79 +20,110 @@ type Stage =
   | "demographics"
   | "calibration"
   | "config"
-  | "experiment"
+  | "intro"
+  | "session"
   | "export";
 
+// One entry per session in a day's run.
+interface SessionSpec {
+  type: SessionType;
+  index: number; // 1-based within its type
+  total: number; // total sessions of this type
+}
+
 const DEFAULT_CONFIG: ExperimentConfigData = {
-  number_of_sentences_per_session: 5,
+  number_of_sentences_per_session: 10, // words per session
+  num_practice_sessions: 1,
+  num_experiment_sessions: 5,
   selection_key: "Space",
   finish_sentence_key: "Enter",
   gaze_source: "MouseDebug",
   gaze_sampling_interval_ms: 16,
   key_radius_px: 80,
-  key_spacing_px: 22,
+  key_spacing_px: 320,
   keyboard_scale: 1.3,
-  dataset_file: "phrases_mackenzie.json",
+  dataset_file: "words_8.json",
   gaze_smoothing_enabled: true,
   gaze_smoothing_min_cutoff: 1.0,
   gaze_smoothing_beta: 0.5,
 };
 
-const formatSessionId = (n: number) => `S${String(n).padStart(2, "0")}`;
+// Tidy participant ids into P01, P02, … Extract digits, drop leading zeros,
+// zero-pad to two. Ids with no digits fall back to a trimmed, upper-cased value.
+function normalizeParticipantId(raw: string): string {
+  const digits = raw.replace(/\D/g, "");
+  if (digits) return `P${String(parseInt(digits, 10)).padStart(2, "0")}`;
+  return raw.trim().toUpperCase();
+}
+
+function buildPlan(cfg: ExperimentConfigData): SessionSpec[] {
+  const plan: SessionSpec[] = [];
+  for (let i = 1; i <= cfg.num_practice_sessions; i++) {
+    plan.push({ type: "practice", index: i, total: cfg.num_practice_sessions });
+  }
+  for (let i = 1; i <= cfg.num_experiment_sessions; i++) {
+    plan.push({ type: "experiment", index: i, total: cfg.num_experiment_sessions });
+  }
+  return plan;
+}
 
 export default function App() {
   const [stage, setStage] = useState<Stage>("demographics");
   const [demographics, setDemographics] = useState<Demographics | null>(null);
   const [calibration, setCalibration] = useState<CalibrationResult | null>(null);
   const [config, setConfig] = useState<ExperimentConfigData>(DEFAULT_CONFIG);
-  const [sessionSentences, setSessionSentences] = useState<string[]>([]);
-  // Full dataset loaded in the config stage. Kept around so that a same-
-  // participant "next session" can resample without re-loading or re-prompting.
-  const [datasetSentences, setDatasetSentences] = useState<string[]>([]);
-  const [finalLogger, setFinalLogger] = useState<DataLogger | null>(null);
+  // Full dataset loaded in the config stage; sessions resample from it.
+  const [datasetWords, setDatasetWords] = useState<string[]>([]);
   const [debugOverlay, setDebugOverlay] = useState<boolean>(false);
-  // Auto-incremented per participant. Bumped each time the user clicks
-  // "Run another session" on the ExportPage.
-  const [sessionNumber, setSessionNumber] = useState<number>(1);
 
-  // Full reset — back to demographics, fresh participant.
+  // One logger for the whole day's run (all sessions).
+  const loggerRef = useRef<DataLogger | null>(null);
+  // Session sequence for the day, and where we are in it.
+  const [plan, setPlan] = useState<SessionSpec[]>([]);
+  const [planPos, setPlanPos] = useState<number>(0);
+  const [sessionWords, setSessionWords] = useState<string[]>([]);
+
+  // Full reset — back to a blank demographics form for a fresh participant.
   const restart = () => {
     setStage("demographics");
     setDemographics(null);
     setCalibration(null);
-    setSessionSentences([]);
-    setDatasetSentences([]);
-    setFinalLogger(null);
-    setSessionNumber(1);
+    setDatasetWords([]);
+    loggerRef.current = null;
+    setPlan([]);
+    setPlanPos(0);
+    setSessionWords([]);
   };
 
-  // Same participant, next session. Bumps the session number, resamples
-  // sentences from the dataset loaded earlier, and jumps straight to the
-  // experiment — calibration and config are reused as-is. The gaze library's
-  // internal calibration persists across sessions because the GazeProvider
-  // stays mounted with the same source.
-  const nextSession = () => {
-    if (!demographics || datasetSentences.length === 0) return;
-    const nextN = sessionNumber + 1;
-    setSessionNumber(nextN);
-    setDemographics({ ...demographics, session_id: formatSessionId(nextN) });
-    // +1 for the practice trial (trial_000); see config-stage handler.
-    const n = Math.min(
-      config.number_of_sentences_per_session + 1,
-      datasetSentences.length,
-    );
-    const unique = Array.from(new Set(datasetSentences));
-    setSessionSentences(sampleWithoutReplacement(unique, n));
-    setFinalLogger(null);
-    setStage("experiment");
+  // Sample the words for one session from the loaded dataset (unique within the
+  // session; may repeat across sessions since the dataset is small).
+  const sampleSessionWords = (): string[] => {
+    const n = Math.min(config.number_of_sentences_per_session, datasetWords.length);
+    const unique = Array.from(new Set(datasetWords));
+    return sampleWithoutReplacement(unique, n);
+  };
+
+  const startSession = () => {
+    if (!loggerRef.current) return;
+    const spec = plan[planPos];
+    setSessionWords(sampleSessionWords());
+    loggerRef.current.startSession(spec.type, spec.index);
+    setStage("session");
+  };
+
+  const finishSession = () => {
+    if (planPos + 1 < plan.length) {
+      setPlanPos(planPos + 1);
+      setStage("intro");
+    } else {
+      setStage("export");
+    }
   };
 
   // Wrap everything in GazeProvider so calibration / experiment share gaze.
-  // The source is taken from config, but we want gaze available during
-  // calibration too, even before config — so we pick MouseDebug as a safe
-  // default until config is submitted.
   const gazeSource = config.gaze_source;
   const samplingInterval = Math.max(1, config.gaze_sampling_interval_ms);
+  const currentSpec = plan[planPos];
 
   return (
     <GazeProvider
@@ -112,14 +145,21 @@ export default function App() {
               />
               Debug overlay
             </label>
-            <span className={styles.stage}>stage: {stage}</span>
+            <span className={styles.stage}>
+              stage: {stage}
+              {demographics ? ` · ${demographics.participant_id} · day ${demographics.day}` : ""}
+            </span>
           </div>
         </div>
 
         {stage === "demographics" && (
           <DemographicsForm
+            initial={demographics ?? undefined}
             onSubmit={(d) => {
-              setDemographics({ ...d, session_id: formatSessionId(sessionNumber) });
+              setDemographics({
+                ...d,
+                participant_id: normalizeParticipantId(d.participant_id),
+              });
               setStage("calibration");
             }}
           />
@@ -139,51 +179,59 @@ export default function App() {
           />
         )}
 
-        {stage === "config" && (
+        {stage === "config" && demographics && (
           <ExperimentConfig
             initial={config}
-            onSubmit={(cfg, sentences) => {
+            onSubmit={(cfg, words) => {
               setConfig(cfg);
-              // Keep the full dataset around so "Run another session" can
-              // resample without re-prompting the experimenter.
-              setDatasetSentences(sentences);
-              // One extra sentence on top of the requested count, used for the
-              // practice trial (trial_000). The N requested ones become
-              // trial_001 .. trial_00N.
-              const n = Math.min(
-                cfg.number_of_sentences_per_session + 1,
-                sentences.length,
+              setDatasetWords(words);
+              loggerRef.current = new DataLogger(
+                demographics.participant_id,
+                demographics.day,
               );
-              // Avoid duplicates within the same session; no fixed seed.
-              const unique = Array.from(new Set(sentences));
-              const sampled = sampleWithoutReplacement(unique, n);
-              setSessionSentences(sampled);
-              setStage("experiment");
+              setPlan(buildPlan(cfg));
+              setPlanPos(0);
+              setStage("intro");
             }}
           />
         )}
 
-        {stage === "experiment" && demographics && (
+        {stage === "intro" && currentSpec && (
+          <SessionIntro
+            sessionType={currentSpec.type}
+            sessionIndex={currentSpec.index}
+            sessionTotal={currentSpec.total}
+            wordCount={Math.min(
+              config.number_of_sentences_per_session,
+              datasetWords.length,
+            )}
+            selectionKey={config.selection_key}
+            onStart={startSession}
+          />
+        )}
+
+        {stage === "session" && currentSpec && loggerRef.current && (
           <ExperimentSession
-            demographics={demographics}
+            // Remount per session so trial state resets cleanly.
+            key={`${currentSpec.type}_${currentSpec.index}`}
             config={config}
-            sentences={sessionSentences}
+            words={sessionWords}
+            sessionType={currentSpec.type}
+            sessionIndex={currentSpec.index}
+            sessionTotal={currentSpec.total}
+            logger={loggerRef.current}
             showDebugOverlay={debugOverlay}
-            onFinished={(logger) => {
-              setFinalLogger(logger);
-              setStage("export");
-            }}
+            onFinished={finishSession}
           />
         )}
 
-        {stage === "export" && demographics && calibration && finalLogger && (
+        {stage === "export" && demographics && calibration && loggerRef.current && (
           <ExportPage
             demographics={demographics}
             calibration={calibration}
             config={config}
-            logger={finalLogger}
+            logger={loggerRef.current}
             onRestart={restart}
-            onNextSession={nextSession}
           />
         )}
       </div>

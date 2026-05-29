@@ -1,53 +1,59 @@
-// Per-trial data logger. Keeps rows in memory and produces CSV strings on demand.
-// Logging logic is intentionally separated from UI components.
+// Data logger for one day's run. Spans all sessions (practice + experiment) of
+// the day, tagging every row with its session context (day, session type/index,
+// trial). Gaze samples and key presses are collected into a SINGLE per-trial
+// event log (one CSV per trial). Logging logic is intentionally separated from
+// UI components.
 
 import type {
+  EventLogRow,
   EventType,
-  GazeLogRow,
   GazeSample,
-  InputLogRow,
+  KeyDef,
+  SessionContext,
+  SessionType,
   TrialFiles,
   TrialSummary,
 } from "../types";
 import { toCSV } from "../utils/csv";
 import { levenshtein } from "../utils/levenshtein";
 
-const GAZE_COLUMNS: (keyof GazeLogRow)[] = [
+const EVENT_COLUMNS: (keyof EventLogRow)[] = [
   "timestamp",
   "participant_id",
-  "session_id",
+  "day",
+  "session_type",
+  "session_index",
+  "session_label",
   "trial_id",
-  "target_sentence",
+  "target_word",
+  "event_type",
+  "gaze_x",
+  "gaze_y",
   "left_eye_x",
   "left_eye_y",
   "right_eye_x",
   "right_eye_y",
-  "gaze_x",
-  "gaze_y",
   "hovered_key",
-  "event_type",
-];
-
-const INPUT_COLUMNS: (keyof InputLogRow)[] = [
-  "timestamp",
-  "participant_id",
-  "session_id",
-  "trial_id",
-  "target_sentence",
-  "input_index",
+  "target_char",
+  "target_key_x",
+  "target_key_y",
+  "physical_key",
   "selected_character",
-  "hovered_key_at_selection",
-  "gaze_x_at_selection",
-  "gaze_y_at_selection",
-  "physical_key_pressed",
+  "input_index",
   "typed_text_so_far",
+  "key_down_time",
+  "key_up_time",
+  "key_hold_ms",
 ];
 
 const SUMMARY_COLUMNS: (keyof TrialSummary)[] = [
   "participant_id",
-  "session_id",
+  "day",
+  "session_type",
+  "session_index",
+  "session_label",
   "trial_id",
-  "target_sentence",
+  "target_word",
   "typed_text",
   "start_time",
   "end_time",
@@ -56,128 +62,175 @@ const SUMMARY_COLUMNS: (keyof TrialSummary)[] = [
   "target_length",
   "error_count",
   "character_error_rate",
-  "raw_gaze_log_file",
-  "character_log_file",
+  "event_log_file",
 ];
+
+// Default (null) values for the fields a given row type doesn't use, so each
+// push only has to specify what's relevant.
+const EMPTY_GAZE = {
+  gaze_x: null,
+  gaze_y: null,
+  left_eye_x: null,
+  left_eye_y: null,
+  right_eye_x: null,
+  right_eye_y: null,
+  hovered_key: null,
+};
+const EMPTY_TARGET = {
+  target_char: null,
+  target_key_x: null,
+  target_key_y: null,
+};
+const EMPTY_KEY = {
+  physical_key: null,
+  selected_character: null,
+  input_index: null,
+  typed_text_so_far: null,
+  key_down_time: null,
+  key_up_time: null,
+  key_hold_ms: null,
+};
 
 interface OpenTrial {
   trial_id: string;
-  trial_index: number; // 1-based
-  target_sentence: string;
+  trial_index: number; // 1-based within the session
+  target_word: string;
   start_time: number;
-  gaze_rows: GazeLogRow[];
-  input_rows: InputLogRow[];
+  rows: EventLogRow[];
 }
 
 export class DataLogger {
   private participantId: string;
-  private sessionId: string;
+  private day: string;
+  // Current session context (set via startSession before each session).
+  private sessionType: SessionType = "practice";
+  private sessionIndex = 0;
+  private sessionLabel = "";
   private active: OpenTrial | null = null;
   private trialFiles: TrialFiles[] = [];
   private summaries: TrialSummary[] = [];
+  // Latest keyboard geometry (key centres + hit half-extents), captured so the
+  // full key layout can be exported alongside the per-trial logs.
+  private keyboardLayout: KeyDef[] = [];
 
-  constructor(participantId: string, sessionId: string) {
+  constructor(participantId: string, day: string) {
     this.participantId = participantId;
-    this.sessionId = sessionId;
+    this.day = day;
   }
 
-  startTrial(trialIndex: number, target: string): void {
-    const trial_id = formatTrialId(trialIndex);
+  // Begin a new session (practice or experiment). Subsequent trials are tagged
+  // with this context until the next startSession call.
+  startSession(type: SessionType, index: number): void {
+    this.sessionType = type;
+    this.sessionIndex = index;
+    this.sessionLabel = `${type}_${index}`;
+  }
+
+  private ctx(): SessionContext {
+    return {
+      participant_id: this.participantId,
+      day: this.day,
+      session_type: this.sessionType,
+      session_index: this.sessionIndex,
+      session_label: this.sessionLabel,
+    };
+  }
+
+  startTrial(trialNumber: number, target: string): void {
+    const trial_id = formatTrialId(trialNumber);
     const start_time = Date.now();
     this.active = {
       trial_id,
-      trial_index: trialIndex,
-      target_sentence: target,
+      trial_index: trialNumber,
+      target_word: target,
       start_time,
-      gaze_rows: [],
-      input_rows: [],
+      rows: [],
     };
-    // trial_start marker.
-    this.active.gaze_rows.push({
+    this.active.rows.push({
+      ...this.ctx(),
+      ...EMPTY_GAZE,
+      ...EMPTY_TARGET,
+      ...EMPTY_KEY,
       timestamp: start_time,
-      participant_id: this.participantId,
-      session_id: this.sessionId,
       trial_id,
-      target_sentence: target,
-      left_eye_x: null,
-      left_eye_y: null,
-      right_eye_x: null,
-      right_eye_y: null,
-      gaze_x: null,
-      gaze_y: null,
-      hovered_key: null,
+      target_word: target,
       event_type: "trial_start",
     });
   }
 
-  // Log a continuous gaze sample.
-  logGaze(sample: GazeSample, hoveredKey: string | null): void {
+  // Log a continuous gaze sample. `target` is the current intended letter and
+  // its key centre (the next letter to enter), in the same px space as gaze.
+  logGaze(
+    sample: GazeSample,
+    hoveredKey: string | null,
+    target: { char: string | null; x: number | null; y: number | null },
+  ): void {
     if (!this.active) return;
-    this.active.gaze_rows.push({
+    this.active.rows.push({
+      ...this.ctx(),
+      ...EMPTY_KEY,
       timestamp: sample.timestamp,
-      participant_id: this.participantId,
-      session_id: this.sessionId,
       trial_id: this.active.trial_id,
-      target_sentence: this.active.target_sentence,
+      target_word: this.active.target_word,
+      event_type: "gaze_sample",
+      gaze_x: sample.x,
+      gaze_y: sample.y,
       left_eye_x: sample.left_eye_x,
       left_eye_y: sample.left_eye_y,
       right_eye_x: sample.right_eye_x,
       right_eye_y: sample.right_eye_y,
-      gaze_x: sample.x,
-      gaze_y: sample.y,
       hovered_key: hoveredKey,
-      event_type: "gaze_sample",
+      target_char: target.char,
+      target_key_x: target.x,
+      target_key_y: target.y,
     });
   }
 
-  // Log a discrete event in the gaze stream (selection presses, etc.).
-  logGazeEvent(
-    event: EventType,
-    gazeX: number | null,
-    gazeY: number | null,
-    hoveredKey: string | null,
-  ): void {
+  // Log a single key event (a down or an up) as its own row, so the Space-bar
+  // down-time and up-time each appear as a distinct, time-ordered entry in the
+  // unified log. `time` is this event's timestamp; down_time/up_time/hold are
+  // filled in where known (the up row carries both plus the hold duration).
+  logKeyEvent(p: {
+    eventType: EventType;
+    time: number;
+    physicalKey: string;
+    downTime: number | null;
+    upTime: number | null;
+    holdMs: number | null;
+    gazeX: number | null;
+    gazeY: number | null;
+    hoveredKey: string | null;
+    targetChar: string | null;
+    targetKeyX: number | null;
+    targetKeyY: number | null;
+    selectedCharacter: string | null;
+    inputIndex: number | null;
+    typedTextSoFar: string | null;
+  }): void {
     if (!this.active) return;
-    this.active.gaze_rows.push({
-      timestamp: Date.now(),
-      participant_id: this.participantId,
-      session_id: this.sessionId,
+    this.active.rows.push({
+      ...this.ctx(),
+      timestamp: p.time,
       trial_id: this.active.trial_id,
-      target_sentence: this.active.target_sentence,
+      target_word: this.active.target_word,
+      event_type: p.eventType,
+      gaze_x: p.gazeX,
+      gaze_y: p.gazeY,
       left_eye_x: null,
       left_eye_y: null,
       right_eye_x: null,
       right_eye_y: null,
-      gaze_x: gazeX,
-      gaze_y: gazeY,
-      hovered_key: hoveredKey,
-      event_type: event,
-    });
-  }
-
-  logCharacter(params: {
-    inputIndex: number;
-    selectedCharacter: string;
-    hoveredKeyAtSelection: string | null;
-    gazeXAtSelection: number | null;
-    gazeYAtSelection: number | null;
-    physicalKeyPressed: string;
-    typedTextSoFar: string;
-  }): void {
-    if (!this.active) return;
-    this.active.input_rows.push({
-      timestamp: Date.now(),
-      participant_id: this.participantId,
-      session_id: this.sessionId,
-      trial_id: this.active.trial_id,
-      target_sentence: this.active.target_sentence,
-      input_index: params.inputIndex,
-      selected_character: params.selectedCharacter,
-      hovered_key_at_selection: params.hoveredKeyAtSelection,
-      gaze_x_at_selection: params.gazeXAtSelection,
-      gaze_y_at_selection: params.gazeYAtSelection,
-      physical_key_pressed: params.physicalKeyPressed,
-      typed_text_so_far: params.typedTextSoFar,
+      hovered_key: p.hoveredKey,
+      target_char: p.targetChar,
+      target_key_x: p.targetKeyX,
+      target_key_y: p.targetKeyY,
+      physical_key: p.physicalKey,
+      selected_character: p.selectedCharacter,
+      input_index: p.inputIndex,
+      typed_text_so_far: p.typedTextSoFar,
+      key_down_time: p.downTime,
+      key_up_time: p.upTime,
+      key_hold_ms: p.holdMs,
     });
   }
 
@@ -186,49 +239,43 @@ export class DataLogger {
 
     // Discard "ghost" trials produced by React.StrictMode's dev-only
     // mount → cleanup → mount cycle: the cleanup fires endTrial immediately
-    // after startTrial with no actual gaze samples or input collected. A real
-    // trial always accumulates either gaze samples (streamed continuously)
-    // or input events. Without this guard the session summary would contain
-    // an extra empty row for each remount.
-    const hasGazeSamples = this.active.gaze_rows.some(
-      (r) => r.event_type === "gaze_sample",
+    // after startTrial with no actual gaze samples or input collected.
+    const hasGaze = this.active.rows.some((r) => r.event_type === "gaze_sample");
+    const hasInput = this.active.rows.some(
+      (r) =>
+        r.event_type === "selection_down" ||
+        r.event_type === "finish_down",
     );
-    const hasInput = this.active.input_rows.length > 0;
-    if (!hasGazeSamples && !hasInput) {
+    if (!hasGaze && !hasInput) {
       this.active = null;
       return null;
     }
 
     const end_time = Date.now();
-    this.active.gaze_rows.push({
+    this.active.rows.push({
+      ...this.ctx(),
+      ...EMPTY_GAZE,
+      ...EMPTY_TARGET,
+      ...EMPTY_KEY,
       timestamp: end_time,
-      participant_id: this.participantId,
-      session_id: this.sessionId,
       trial_id: this.active.trial_id,
-      target_sentence: this.active.target_sentence,
-      left_eye_x: null,
-      left_eye_y: null,
-      right_eye_x: null,
-      right_eye_y: null,
-      gaze_x: null,
-      gaze_y: null,
-      hovered_key: null,
+      target_word: this.active.target_word,
       event_type: "trial_end",
     });
 
-    const error_count = levenshtein(this.active.target_sentence, typedText);
-    const target_length = this.active.target_sentence.length;
+    const error_count = levenshtein(this.active.target_word, typedText);
+    const target_length = this.active.target_word.length;
     const character_error_rate =
       target_length === 0 ? 0 : error_count / target_length;
 
-    const gaze_file = `trial_${pad3(this.active.trial_index)}_gaze.csv`;
-    const input_file = `trial_${pad3(this.active.trial_index)}_input.csv`;
+    // One file per trial, namespaced under the session folder so the same trial
+    // numbers across sessions never collide.
+    const file = `${this.sessionLabel}/trial_${pad3(this.active.trial_index)}_events.csv`;
 
     const summary: TrialSummary = {
-      participant_id: this.participantId,
-      session_id: this.sessionId,
+      ...this.ctx(),
       trial_id: this.active.trial_id,
-      target_sentence: this.active.target_sentence,
+      target_word: this.active.target_word,
       typed_text: typedText,
       start_time: this.active.start_time,
       end_time,
@@ -237,21 +284,30 @@ export class DataLogger {
       target_length,
       error_count,
       character_error_rate,
-      raw_gaze_log_file: gaze_file,
-      character_log_file: input_file,
+      event_log_file: file,
     };
 
     this.summaries.push(summary);
     this.trialFiles.push({
       trial_id: this.active.trial_id,
-      gaze_file_name: gaze_file,
-      gaze_csv: toCSV(this.active.gaze_rows, GAZE_COLUMNS),
-      input_file_name: input_file,
-      input_csv: toCSV(this.active.input_rows, INPUT_COLUMNS),
+      session_label: this.sessionLabel,
+      file_name: file,
+      csv: toCSV(this.active.rows, EVENT_COLUMNS),
     });
 
     this.active = null;
     return summary;
+  }
+
+  // Record the current keyboard geometry (called whenever the layout settles).
+  setKeyboardLayout(keys: KeyDef[]): void {
+    this.keyboardLayout = keys;
+  }
+
+  // CSV of every key's centre and hit half-extents (viewport px), so analyses
+  // can compute gaze-to-key distances for any key, not just the current target.
+  getKeyboardLayoutCSV(): string {
+    return toCSV(this.keyboardLayout, ["char", "cx", "cy", "halfW", "halfH"]);
   }
 
   getTrialFiles(): TrialFiles[] {

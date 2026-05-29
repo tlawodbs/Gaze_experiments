@@ -14,9 +14,6 @@ interface Props {
   config: ExperimentConfigData;
   logger: DataLogger;
   onRestart: () => void;
-  // Same participant, fresh session — App bumps session_id and routes back to
-  // calibration. Useful for studying learning effects across sessions.
-  onNextSession: () => void;
 }
 
 export function ExportPage({
@@ -25,15 +22,17 @@ export function ExportPage({
   config,
   logger,
   onRestart,
-  onNextSession,
 }: Props) {
   const [zipBuilding, setZipBuilding] = useState(false);
 
   const trials = useMemo(() => logger.getTrialFiles(), [logger]);
   const summaryCSV = useMemo(() => logger.getSessionSummaryCSV(), [logger]);
   const summaries = useMemo(() => logger.getSummaries(), [logger]);
+  const layoutCSV = useMemo(() => logger.getKeyboardLayoutCSV(), [logger]);
 
-  const folderPath = `data/participant_${demographics.participant_id || "unknown"}/session_${demographics.session_id || "unknown"}`;
+  const pid = demographics.participant_id || "unknown";
+  const day = demographics.day || "unknown";
+  const folderPath = `data/${pid}/day_${day}`;
 
   const downloadAsZip = async () => {
     setZipBuilding(true);
@@ -43,16 +42,14 @@ export function ExportPage({
       root.file("demographics.json", JSON.stringify(demographics, null, 2));
       root.file("calibration.json", JSON.stringify(calibration, null, 2));
       root.file("experiment_config.json", JSON.stringify(config, null, 2));
+      // One unified event log per trial, namespaced under its session folder.
       for (const t of trials) {
-        root.file(t.gaze_file_name, t.gaze_csv);
-        root.file(t.input_file_name, t.input_csv);
+        root.file(t.file_name, t.csv);
       }
-      root.file("session_summary.csv", summaryCSV);
+      root.file("day_summary.csv", summaryCSV);
+      root.file("keyboard_layout.csv", layoutCSV);
       const blob = await zip.generateAsync({ type: "blob" });
-      downloadBlob(
-        blob,
-        `${demographics.participant_id || "participant"}_${demographics.session_id || "session"}_data.zip`,
-      );
+      downloadBlob(blob, `${pid}_day${day}_data.zip`);
     } finally {
       setZipBuilding(false);
     }
@@ -60,18 +57,23 @@ export function ExportPage({
 
   return (
     <div className={styles.root}>
-      <h2>Session complete</h2>
+      <h2>
+        Day {day} complete — {pid}
+      </h2>
       <p className={styles.subtitle}>
         Download the per-trial logs and aggregate files below. The ZIP bundle
-        is recommended.
+        is recommended. Every row is tagged with day, session type/index, and
+        trial.
       </p>
 
       <section className={styles.summary}>
-        <h3>Trial summary</h3>
+        <h3>Trial summary ({summaries.length} trials)</h3>
         <table>
           <thead>
             <tr>
-              <th>trial_id</th>
+              <th>session</th>
+              <th>trial</th>
+              <th>target</th>
               <th>typed</th>
               <th>chars</th>
               <th>errors</th>
@@ -81,8 +83,10 @@ export function ExportPage({
           </thead>
           <tbody>
             {summaries.map((s) => (
-              <tr key={s.trial_id}>
+              <tr key={`${s.session_label}_${s.trial_id}`}>
+                <td>{s.session_label}</td>
                 <td>{s.trial_id}</td>
+                <td className={styles.mono}>{s.target_word}</td>
                 <td className={styles.mono}>{s.typed_text}</td>
                 <td>{s.num_characters_typed}</td>
                 <td>{s.error_count}</td>
@@ -139,21 +143,25 @@ export function ExportPage({
           </button>
           <button
             onClick={() =>
-              downloadText(summaryCSV, "session_summary.csv", "text/csv")
+              downloadText(summaryCSV, "day_summary.csv", "text/csv")
             }
           >
-            session_summary.csv
+            day_summary.csv
+          </button>
+          <button
+            onClick={() =>
+              downloadText(layoutCSV, "keyboard_layout.csv", "text/csv")
+            }
+          >
+            keyboard_layout.csv
           </button>
         </div>
 
         <div className={styles.row}>
           {trials.map((t) => (
-            <span key={t.trial_id} className={styles.trialChip}>
-              <button onClick={() => downloadText(t.gaze_csv, t.gaze_file_name, "text/csv")}>
-                {t.gaze_file_name}
-              </button>
-              <button onClick={() => downloadText(t.input_csv, t.input_file_name, "text/csv")}>
-                {t.input_file_name}
+            <span key={t.file_name} className={styles.trialChip}>
+              <button onClick={() => downloadText(t.csv, t.file_name.replace(/\//g, "_"), "text/csv")}>
+                {t.file_name}
               </button>
             </span>
           ))}
@@ -161,13 +169,8 @@ export function ExportPage({
       </section>
 
       <div className={styles.restartRow}>
-        <button className={styles.primary} onClick={onNextSession}>
-          ▶ Run another session (same participant, S
-          {String(parseInt(demographics.session_id.replace(/\D/g, ""), 10) + 1).padStart(2, "0")}
-          )
-        </button>
-        <button className={styles.secondary} onClick={onRestart}>
-          ↺ Restart for a new participant
+        <button className={styles.primary} onClick={onRestart}>
+          ↺ Start a new run (select participant &amp; day)
         </button>
       </div>
     </div>

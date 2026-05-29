@@ -18,13 +18,20 @@ interface RowKey {
   label?: string;
 }
 
-// QWERTY rows plus a wide space bar. Each entry is one renderable key.
+// Reduced 8-letter keyboard for gaze text entry. The alphabet is restricted to
+// {a, e, l, n, o, r, s, t} — a set that still composes many short words — laid
+// out as two rows of four so each key can be large and well separated, which
+// matters for low-accuracy webcam gaze. No space key: targets are single words.
 const ROWS: RowKey[][] = [
-  "qwertyuiop".split("").map((c) => ({ char: c, widthFactor: 1 })),
-  "asdfghjkl".split("").map((c) => ({ char: c, widthFactor: 1 })),
-  "zxcvbnm".split("").map((c) => ({ char: c, widthFactor: 1 })),
-  [{ char: " ", widthFactor: 6, label: "space" }],
+  "aeln".split("").map((c) => ({ char: c, widthFactor: 1 })),
+  "orst".split("").map((c) => ({ char: c, widthFactor: 1 })),
 ];
+
+// The visible key is drawn a bit smaller than its layout cell. This shrinks the
+// *appearance* of each target without touching the hit region (which is reported
+// from the full cell + spacing in the effect below), so targets look small and
+// clearly separated while selection stays forgiving.
+const VISIBLE_KEY_FRACTION = 0.82;
 
 interface Props {
   radius: number; // base radius in px (before scale) — half the letter-key height
@@ -116,7 +123,7 @@ export const KeyboardLayout = forwardRef<HTMLDivElement, Props>(function Keyboar
         cursorX += keyW + sp;
       }
     });
-    return { keys, containerW, containerH, r };
+    return { keys, containerW, containerH, r, sp };
   }, [radius, scale, spacing]);
 
   // Effective radius after fit-scaling — drives font size / shape decisions.
@@ -137,16 +144,25 @@ export const KeyboardLayout = forwardRef<HTMLDivElement, Props>(function Keyboar
   );
 
   // Report viewport-space key positions whenever geometry actually changes.
+  //
+  // The reported hit area is intentionally larger than the visible key: we
+  // expand each half-extent by half the inter-key spacing so a key's hit region
+  // reaches the midpoint toward its neighbours. The parent treats these as
+  // rectangles, so adjacent regions meet exactly on both axes and tile the whole
+  // keyboard with no dead gaps (corners included). Gaze that lands anywhere
+  // between widely-spaced keys still selects the nearest one — forgiving for
+  // low-accuracy gaze while keeping the visible targets small and well separated.
   useEffect(() => {
     const el = innerRef.current;
     if (!el || !onLayout) return;
     const rect = el.getBoundingClientRect();
+    const pad = layout.sp / 2;
     const keys: KeyDef[] = layout.keys.map((k) => ({
       char: k.char,
       cx: rect.left + k.localX,
       cy: rect.top + k.localY,
-      halfW: k.w / 2,
-      halfH: k.h / 2,
+      halfW: k.w / 2 + pad,
+      halfH: k.h / 2 + pad,
     }));
     onLayout(keys);
   }, [layout, onLayout]);
@@ -162,18 +178,22 @@ export const KeyboardLayout = forwardRef<HTMLDivElement, Props>(function Keyboar
       <div ref={setContainerRef} className={styles.board} style={containerStyle}>
         {layout.keys.map((k) => {
           const isHover = hoveredKey === k.char;
+          // Visible size is shrunk from the layout cell; centre stays put so the
+          // hit region (full cell + spacing) is unaffected.
+          const vw = k.w * VISIBLE_KEY_FRACTION;
+          const vh = k.h * VISIBLE_KEY_FRACTION;
           // Square keys → circles; non-square (space) → pills.
-          const borderRadius = k.w === k.h ? "50%" : k.h / 2;
+          const borderRadius = vw === vh ? "50%" : vh / 2;
           return (
             <div
               key={k.char}
               className={`${styles.key} ${isHover ? styles.hover : ""}`}
               style={{
-                width: k.w,
-                height: k.h,
-                left: k.localX - k.w / 2,
-                top: k.localY - k.h / 2,
-                fontSize: Math.max(14, r * 0.9),
+                width: vw,
+                height: vh,
+                left: k.localX - vw / 2,
+                top: k.localY - vh / 2,
+                fontSize: Math.max(14, r * 0.9 * VISIBLE_KEY_FRACTION),
                 borderRadius,
               }}
               // No onClick — selection is via gaze + physical key only.

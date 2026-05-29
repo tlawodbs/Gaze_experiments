@@ -56,12 +56,12 @@ export function ExperimentConfig({ initial, onSubmit }: Props) {
   const handleStart = (e: FormEvent) => {
     e.preventDefault();
     if (datasetPreview.length === 0) {
-      alert("Load a sentence dataset first.");
+      alert("Load a word dataset first.");
       return;
     }
     if (cfg.number_of_sentences_per_session > datasetPreview.length) {
       const ok = confirm(
-        `Requested ${cfg.number_of_sentences_per_session} sentences but dataset only has ${datasetPreview.length}. Continue with ${datasetPreview.length}?`,
+        `Requested ${cfg.number_of_sentences_per_session} words but dataset only has ${datasetPreview.length}. Continue with ${datasetPreview.length}?`,
       );
       if (!ok) return;
     }
@@ -73,12 +73,32 @@ export function ExperimentConfig({ initial, onSubmit }: Props) {
       <h2>Experiment Configuration</h2>
 
       <label>
-        # sentences per session
+        # words per session
         <input
           type="number"
           min={1}
           value={cfg.number_of_sentences_per_session}
           onChange={(e) => set("number_of_sentences_per_session", parseInt(e.target.value || "0", 10))}
+        />
+      </label>
+
+      <label>
+        # practice sessions
+        <input
+          type="number"
+          min={0}
+          value={cfg.num_practice_sessions}
+          onChange={(e) => set("num_practice_sessions", parseInt(e.target.value || "0", 10))}
+        />
+      </label>
+
+      <label>
+        # experiment sessions
+        <input
+          type="number"
+          min={1}
+          value={cfg.num_experiment_sessions}
+          onChange={(e) => set("num_experiment_sessions", parseInt(e.target.value || "0", 10))}
         />
       </label>
 
@@ -91,7 +111,7 @@ export function ExperimentConfig({ initial, onSubmit }: Props) {
       </label>
 
       <label>
-        Finish-sentence key (default Enter)
+        Finish-word key (default Enter)
         <KeyPicker
           value={cfg.finish_sentence_key}
           onChange={(k) => set("finish_sentence_key", k)}
@@ -157,7 +177,7 @@ export function ExperimentConfig({ initial, onSubmit }: Props) {
           <input
             value={cfg.dataset_file}
             onChange={(e) => set("dataset_file", e.target.value)}
-            placeholder="phrases_mackenzie.json"
+            placeholder="words_8.json"
           />
           <button type="button" onClick={() => tryLoadDataset(cfg.dataset_file)}>
             Load from /public
@@ -170,7 +190,7 @@ export function ExperimentConfig({ initial, onSubmit }: Props) {
         {datasetError && <div className={styles.error}>{datasetError}</div>}
         {datasetPreview.length > 0 && (
           <div className={styles.preview}>
-            Loaded {datasetPreview.length} sentences. First three:
+            Loaded {datasetPreview.length} words. First three:
             <ol>
               {datasetPreview.slice(0, 3).map((s, i) => (
                 <li key={i}>{s}</li>
