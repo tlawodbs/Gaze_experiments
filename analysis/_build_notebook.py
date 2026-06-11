@@ -78,34 +78,31 @@ pd.set_option("display.width", 160)
 
 code(r'''# ============================ CONFIG ============================
 # Point DATA_ROOT at the folder that CONTAINS the per-participant folders
-# (e.g. data/P00/day_1/...). This notebook lives in analysis/, while the data
-# folder sits at the repo root, so we resolve it relative to the repo root and
-# fall back to a few common spots. We search recursively for day_summary.csv,
-# so any folder with the runs somewhere underneath works.
-# NOTE: the repo lives under ~/Documents, which is iCloud-synced. iCloud can
-# "offload" files (logical size shown, 0 bytes on disk) and a read then triggers
-# an on-demand download that may stall with "Errno 60 Operation timed out".
-# To avoid that we load from a NON-synced copy in ~/Downloads/data first.
-# If you move the data into the repo (or off iCloud), the fallbacks below pick
-# it up automatically. You can also just hard-set DATA_ROOT to any path.
+# (e.g. data/P01/day_1/...). This notebook lives in analysis/, while the data
+# folder sits at the repo root, so we resolve it relative to the repo using
+# paths only — no absolute/machine-specific paths — so it works on any machine
+# after a fresh git clone. We search recursively for day_summary.csv, so any
+# folder with the runs somewhere underneath works. You can also just hard-set
+# DATA_ROOT to any path if your data lives elsewhere.
 def _find_data_root():
     here = Path.cwd()
     candidates = [
-        Path.home() / "Downloads" / "data",   # non-iCloud copy (preferred)
+        here.parent / "data",                  # running from analysis/ (default)
         here / "data",                         # running from repo root
-        here.parent / "data",                  # running from analysis/
         here / "analysis" / "data",
     ]
     for c in candidates:
         if c.exists() and any(c.rglob("day_summary.csv")):
             return c
-    return Path.home() / "Downloads" / "data"
+    return here.parent / "data"
 
 DATA_ROOT = _find_data_root()
 
-# Where aggregated CSVs + figures are written.
-OUT_DIR = Path("analysis_output")
-OUT_DIR.mkdir(exist_ok=True)
+# Where aggregated CSVs + figures are written. Anchored to the repo (next to
+# DATA_ROOT) so output always lands in analysis/analysis_output regardless of
+# the current working directory the notebook is run from.
+OUT_DIR = DATA_ROOT.parent / "analysis" / "analysis_output"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Which sessions to analyse. Practice / warm-up is excluded per the protocol.
 ANALYSE_SESSION_TYPES = ("experiment",)
@@ -574,12 +571,34 @@ if len(day_metrics) and "late_share_of_err" in day_metrics.columns:
     plt.savefig(OUT_DIR / "early_late_by_day.png", dpi=150); plt.show()
 
     # Trigger-offset distribution by day (RQ2).
+    # The vast majority of selections are ON-TIME and are recorded with an exact
+    # offset of 0 (a sentinel, not a measured value). Mixing those zeros into the
+    # histogram produces a single giant spike at 0 that hides the actual early/
+    # late timing. So we plot the distribution of GENUINE early/late offsets only
+    # (offset != 0) and report the on-time fraction separately in the title.
+    off = selections.dropna(subset=["offset_ms"])
+    nz = off[off["offset_ms"] != 0]
+    n_total = len(off)
+    n_ontime = int((off["offset_ms"] == 0).sum())
     fig, ax = plt.subplots(figsize=(7, 4))
-    for day, g in selections.dropna(subset=["offset_ms"]).groupby("day"):
-        ax.hist(g["offset_ms"], bins=40, alpha=0.45, label=f"day {day}", density=True)
+    if len(nz):
+        # Shared bins across days so the per-day overlays are comparable.
+        lo, hi = nz["offset_ms"].min(), nz["offset_ms"].max()
+        bins = np.linspace(lo, hi, 25)
+        for day, g in nz.groupby("day"):
+            ax.hist(g["offset_ms"], bins=bins, alpha=0.45,
+                    label=f"day {day} (n={len(g)})")
     ax.axvline(0, color="k", lw=1)
-    ax.set_xlabel("trigger offset (ms)  · <0 early · >0 late")
-    ax.set_ylabel("density"); ax.set_title("Trigger offset by day (RQ2)")
+    # Direction hints as small gray text under the axis instead of a long xlabel.
+    ax.text(0.0, -0.16, "← early", transform=ax.transAxes,
+            ha="left", va="top", fontsize=8, color="gray")
+    ax.text(1.0, -0.16, "late →", transform=ax.transAxes,
+            ha="right", va="top", fontsize=8, color="gray")
+    ax.set_xlabel("trigger offset (ms)")
+    ax.set_ylabel("count")
+    on_time_pct = 100 * n_ontime / max(n_total, 1)
+    ax.set_title(f"Early/late trigger offset by day (RQ2)\n"
+                 f"on-time excluded: {n_ontime}/{n_total} selections ({on_time_pct:.0f}%)")
     ax.legend(); plt.tight_layout()
     plt.savefig(OUT_DIR / "trigger_offset_by_day.png", dpi=150); plt.show()
 else:
