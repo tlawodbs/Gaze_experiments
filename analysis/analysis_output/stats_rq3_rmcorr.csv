@@ -1,0 +1,11 @@
+x,y,rmcorr_r,p,df,n_points,n_subj,pearson_r
+late_share_of_err,mean_wpm,-0.8268,0.0005,11,18,6,-0.8697
+late_share_of_err,mean_accuracy,-0.6361,0.0194,11,18,6,-0.6749
+early_share_of_err,mean_wpm,-0.3242,0.2798,11,18,6,-0.4438
+error_rate_per_phrase,mean_wpm,-0.8181,0.0006,11,18,6,-0.8876
+error_rate_per_keystroke,mean_wpm,-0.6405,0.0184,11,18,6,-0.7152
+mean_trigger_offset_ms,mean_wpm,-0.6379,0.019,11,18,6,-0.6837
+mean_gaze_pinch_latency_ms,mean_wpm,-0.0044,0.9887,11,18,6,0.1292
+mean_gaze_pinch_latency_ms,mean_accuracy,0.3653,0.2197,11,18,6,0.4023
+mean_fixation_dwell_ms,mean_wpm,-0.6479,0.0166,11,18,6,-0.843
+mean_corrective_saccades,mean_wpm,-0.8784,0.0001,11,18,6,-0.879
